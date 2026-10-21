@@ -7,6 +7,7 @@ punctuation are normalized; words, word order, and punctuation marks are preserv
 from __future__ import annotations
 
 import csv
+import json
 import re
 import zipfile
 from pathlib import Path
@@ -71,7 +72,56 @@ def write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
         writer.writerows(rows)
 
 
+def build_combined_playlist() -> None:
+    """Combine original transcript files in playlist order without editing their text."""
+    metadata_path = OUT / "metadata.json"
+    rows = []
+    if metadata_path.is_file():
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            rows = payload.get("videos", [])
+        except (json.JSONDecodeError, OSError):
+            rows = []
+
+    def playlist_order(path: Path) -> tuple[int, str]:
+        match = re.match(r"^(\\d+)_", path.name)
+        return (int(match.group(1)) if match else 10**9, path.name.casefold())
+
+    by_name = {path.name: path for path in ORIGINALS.glob("*.txt")}
+    ordered = []
+    seen = set()
+    for row in sorted(rows, key=lambda item: int(item.get("playlist_index") or 10**9)):
+        filename = Path(row.get("transcript_file") or "").name
+        source = by_name.get(filename)
+        if source and source not in seen and source.stat().st_size:
+            ordered.append((source, row))
+            seen.add(source)
+
+    for source in sorted(ORIGINALS.glob("*.txt"), key=playlist_order):
+        if source not in seen and source.stat().st_size:
+            ordered.append((source, {}))
+
+    chunks = []
+    for source, row in ordered:
+        title = (row.get("title") or source.stem).strip()
+        url = (row.get("url") or "").strip()
+        header = [f"ВИДЕО: {title}"]
+        if url:
+            header.append(f"ССЫЛКА: {url}")
+        header.append("=" * 72)
+        transcript = source.read_text(encoding="utf-8", errors="replace").strip("\\ufeff\\r\\n")
+        chunks.append("\\n".join(header) + "\\n\\n" + transcript)
+    combined = OUT / "playlist_transcripts.txt"
+    combined.write_text(
+        ("\\n\\n\\n".join(chunks) + "\\n") if chunks else
+        "Транскрипции пока не созданы.\\n",
+        encoding="utf-8",
+    )
+    print(f"Combined playlist TXT: {len(ordered)} transcript(s) in playlist order.")
+
+
 def rebuild_zip() -> None:
+    build_combined_playlist()
     archive_path = OUT / "youtube-transcripts.zip"
     candidates = []
     for folder, archive_folder in ((ORIGINALS, "transcripts"), (EDITED, "edited_transcripts")):
@@ -80,6 +130,7 @@ def rebuild_zip() -> None:
     report_names = [
         "report.csv", "failed_videos.csv", "failed_videos.txt", "summary.json",
         "metadata.json", "editorial_summary.csv", "editorial_changes.csv",
+        "playlist_transcripts.txt",
     ]
     candidates.extend((OUT / name, name) for name in report_names if (OUT / name).is_file())
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
