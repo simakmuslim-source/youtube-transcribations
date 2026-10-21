@@ -102,6 +102,29 @@ def fetch_transcript(video_id: str):
             time.sleep(wait)
     raise RuntimeError(f"Failed after {max_attempts} attempts: {type(last_error).__name__}: {last_error}")
 
+def fetch_with_whisper(video_id: str) -> str:
+    """Fallback: download audio and transcribe it locally with faster-whisper."""
+    import tempfile
+    from pytubefix import YouTube
+    from faster_whisper import WhisperModel
+
+    print("  Trying Whisper fallback: downloading audio...", flush=True)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
+        stream = yt.streams.filter(only_audio=True).first()
+        if stream is None:
+            raise RuntimeError("YouTube не предоставил аудиопоток")
+        audio_path = stream.download(output_path=temp_dir, filename="audio")
+        print("  Audio downloaded; loading Whisper small model on CPU...", flush=True)
+        model = WhisperModel("small", device="cpu", compute_type="int8")
+        segments, info = model.transcribe(audio_path, beam_size=5, vad_filter=True)
+        parts = [segment.text.strip() for segment in segments if segment.text.strip()]
+        text = " ".join(parts).strip()
+        if not text:
+            raise RuntimeError("Whisper не распознал речь")
+        print(f"  Whisper fallback OK: {len(text)} chars; language={info.language}", flush=True)
+        return text
+
 def main():
     out = Path("output")
     transcripts = out / "transcripts"
@@ -119,11 +142,22 @@ def main():
             text = fetch_transcript(video_id)
             path.write_text(text.rstrip() + "\n", encoding="utf-8")
             row["status"] = "ok"
-            print(f"  OK: {len(text)} chars", flush=True)
-        except Exception as e:
-            row["status"] = "error"
-            row["error"] = f"{type(e).__name__}: {e}"[:1000]
-            print("  ERROR: " + row["error"], flush=True)
+            print(f"  OK via public transcript API: {len(text)} chars", flush=True)
+        except Exception as api_error:
+            print(f"  Public transcript API failed: {type(api_error).__name__}: {api_error}", flush=True)
+            try:
+                text = fetch_with_whisper(video_id)
+                path.write_text(text.rstrip() + "\n", encoding="utf-8")
+                row["status"] = "ok"
+                row["source"] = "faster-whisper-small"
+                row["error"] = f"Primary API failed; recovered with Whisper: {type(api_error).__name__}: {api_error}"[:1000]
+            except Exception as whisper_error:
+                row["status"] = "error"
+                row["error"] = (
+                    f"API: {type(api_error).__name__}: {api_error}; "
+                    f"Whisper: {type(whisper_error).__name__}: {whisper_error}"
+                )[:1500]
+                print("  ERROR: " + row["error"], flush=True)
         except Exception as e:
             row["status"] = "error"
             row["error"] = f"{type(e).__name__}: {e}"[:1000]
