@@ -37,7 +37,9 @@ jobs:
           test -s output/edited_transcripts/sample.txt
           test -s output/editorial_summary.csv
           test -s output/editorial_changes.csv
-          python -c "import zipfile; z=zipfile.ZipFile('output/youtube-transcripts.zip'); names=set(z.namelist()); assert 'transcripts/sample.txt' in names; assert 'edited_transcripts/sample.txt' in names; assert 'editorial_changes.csv' in names; print('Editor validation passed')"
+          test -s output/playlist_transcripts.txt
+          grep -q 'Привет' output/playlist_transcripts.txt
+          python -c "import zipfile; z=zipfile.ZipFile('output/youtube-transcripts.zip'); names=set(z.namelist()); assert 'transcripts/sample.txt' in names; assert 'edited_transcripts/sample.txt' in names; assert 'editorial_changes.csv' in names; assert 'playlist_transcripts.txt' in names; print('Editor validation passed')"
 
   extract:
     runs-on: ubuntu-latest
@@ -89,5 +91,6 @@ jobs:
             output/metadata.json
             output/editorial_summary.csv
             output/editorial_changes.csv
+            output/playlist_transcripts.txt
           if-no-files-found: warn
           retention-days: 30
