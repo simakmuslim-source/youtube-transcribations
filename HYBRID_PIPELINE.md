@@ -9,7 +9,16 @@ This repository uses several independent ways to collect a transcript. Each vide
 3. **Audio download and local speech recognition** — the script first tries pytubefix; if that fails, it tries yt-dlp. The downloaded audio is transcribed with faster-whisper (small, CPU/int8).
 4. **Failure report** — if every provider fails, the entry is preserved with the video title, ID, link, and diagnostics for all attempted stages.
 
-No editorial correction is applied to caption text. Whisper output is automatic speech recognition, so it can differ from the source video's subtitles; the source column identifies how each text was produced.
+The original transcription text is written to `output/transcripts/` and is never modified by the editor. After the transcription pass, `light_edit_transcripts.py` creates a separate `output/edited_transcripts/` copy. This deliberately conservative pass only normalizes whitespace and spacing around existing punctuation; it does not replace words, change word order, or rewrite legal terminology. Whisper output is automatic speech recognition, so it can differ from the source video's subtitles; the source column identifies how each original text was produced.
+
+## Light editing outputs
+
+- `edited_transcripts/` — lightly formatted copies; the source originals remain intact in `transcripts/`.
+- `editorial_summary.csv` — one row per transcript, with changed/unchanged status and change counts.
+- `editorial_changes.csv` — a row for every formatting substitution, including the rule and visible before/after text (spaces are shown as ␠ and line breaks as ↵).
+- The ZIP contains both transcript folders, the editorial reports, and the existing transcription status reports. The reports are also uploaded as standalone artifact files.
+
+This is a no-paid-API implementation: it uses Python's standard library, so it adds no extra package install or model runtime. It is intentionally not a grammar or legal proofreading stage; automatic word substitutions could silently distort verbatim legal content.
 
 ## Output files
 
