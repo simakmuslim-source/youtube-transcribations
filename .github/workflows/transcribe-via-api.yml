@@ -12,7 +12,7 @@ permissions:
 
 # A new version replaces an older run using the same rate-limited API.
 concurrency:
-  group: playlist-transcription-api
+  group: playlist-transcription-super-hybrid-v2
   cancel-in-progress: true
 
 jobs:
