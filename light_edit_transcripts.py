@@ -28,6 +28,11 @@ RULES = [
 ]
 
 
+def visible(value: str) -> str:
+    """Render whitespace visibly so CSV changes are understandable."""
+    return value.replace("\\", "\\\\").replace("\t", "⇥").replace("\n", "↵").replace(" ", "␠").replace("\u00a0", "⍽")
+
+
 def apply_rules(text: str, filename: str) -> tuple[str, list[dict]]:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     changes: list[dict] = []
@@ -41,8 +46,8 @@ def apply_rules(text: str, filename: str) -> tuple[str, list[dict]]:
                     "file": filename,
                     "rule": _rule,
                     "description": _description,
-                    "before": before.replace("\n", "\\n"),
-                    "after": after.replace("\n", "\\n"),
+                    "before": visible(before),
+                    "after": visible(after),
                 })
             return after
         text = regex.sub(replace, text)
@@ -52,8 +57,8 @@ def apply_rules(text: str, filename: str) -> tuple[str, list[dict]]:
             "file": filename,
             "rule": "trim_outer_whitespace",
             "description": "Remove whitespace at the beginning/end of the file",
-            "before": text[:80].replace("\n", "\\n") + ("…" if len(text) > 80 else ""),
-            "after": cleaned[:80].replace("\n", "\\n") + ("…" if len(cleaned) > 80 else ""),
+            "before": visible(text[:80]) + ("…" if len(text) > 80 else ""),
+            "after": visible(cleaned[:80]) + ("…" if len(cleaned) > 80 else ""),
         })
     # A final newline is file formatting, not a change to spoken words.
     return cleaned + ("\n" if cleaned else ""), changes
