@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shutil
 import sys
@@ -22,6 +23,15 @@ except ImportError:
     raise SystemExit(2)
 
 _WHISPER_MODELS: dict[str, Any] = {}
+
+
+def with_cookies(options: dict[str, Any]) -> dict[str, Any]:
+    """Use a private Netscape-format cookie file when configured via environment."""
+    cookie_file = os.environ.get("YOUTUBE_COOKIES_FILE")
+    if cookie_file and Path(cookie_file).is_file():
+        options["cookiefile"] = cookie_file
+    return options
+
 
 DEFAULT_PLAYLIST = (
     "https://youtube.com/playlist?"
@@ -89,7 +99,7 @@ def get_playlist_entries(url: str, limit: int | None) -> tuple[dict[str, Any], l
         "no_warnings": True,
         "ignoreerrors": True,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(with_cookies(opts)) as ydl:
         info = ydl.extract_info(url, download=False)
     if not info:
         raise RuntimeError("Не удалось получить сведения о плейлисте.")
@@ -143,7 +153,7 @@ def download_caption(video_url: str, video_id: str, temp_dir: Path, language: st
         "skip_download": True, "quiet": True, "no_warnings": True,
         "ignoreerrors": False,
     }
-    with yt_dlp.YoutubeDL(inspect_opts) as ydl:
+    with yt_dlp.YoutubeDL(with_cookies(inspect_opts)) as ydl:
         info = ydl.extract_info(video_url, download=False)
     if not info:
         return None
