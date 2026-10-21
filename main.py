@@ -179,7 +179,7 @@ def download_caption(video_url: str, video_id: str, temp_dir: Path, language: st
         "no_warnings": True,
         "ignoreerrors": False,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(with_cookies(opts)) as ydl:
         ydl.download([video_url])
     candidates = [p for p in temp_dir.iterdir()
                   if p not in before and p.suffix.lower() in CAPTION_EXTENSIONS]
@@ -218,7 +218,7 @@ def transcribe_whisper(video_url: str, video_id: str, temp_dir: Path,
             "preferredcodec": "wav",
         }],
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(with_cookies(opts)) as ydl:
         ydl.download([video_url])
 
     audio_files = list(audio_dir.glob(f"{safe_name(video_id)}*.wav"))
