@@ -1,0 +1,40 @@
+name: Extract playlist transcripts via public transcript API
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/transcribe-via-api.yml"
+      - "transcribe_via_api.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playlist-transcription-api
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch available transcripts
+        run: python transcribe_via_api.py
+      - name: Upload transcript ZIP and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-transcripts-api
+          path: |
+            output/youtube-transcripts.zip
+            output/report.csv
+            output/metadata.json
+          if-no-files-found: warn
+          retention-days: 14
