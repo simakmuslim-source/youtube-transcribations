@@ -22,7 +22,6 @@ PLAYLIST_URL = f"https://www.youtube.com/playlist?list={PLAYLIST_ID}"
 REQUEST_GAP_SECONDS = 185
 API_MAX_ATTEMPTS = 2
 API_RETRY_SECONDS = 60
-API_RATE_LIMIT_WAIT_SECONDS = 1900
 
 VIDEOS = [
     ("tNiUSSZj2n4", "Бесплатная бригада #бизнес #shorts #shortvideo"),
@@ -67,6 +66,7 @@ FIELDS = [
     "whisper_error", "error",
 ]
 _WHISPER_MODEL = None
+_API_RATE_LIMITED = False
 
 
 def now_utc() -> str:
@@ -107,6 +107,9 @@ def text_from_payload(payload) -> str:
 
 def fetch_transcript_api(video_id: str) -> str:
     """Try the public transcript endpoint first; retry only transient errors."""
+    global _API_RATE_LIMITED
+    if _API_RATE_LIMITED:
+        raise RuntimeError("Public transcript API skipped: rate limit was reached earlier in this run")
     query = urllib.parse.urlencode({"video_url": video_id})
     url = "https://api.freetranscriptapi.com/v1/transcript?" + query
     last_error = None
@@ -127,9 +130,15 @@ def fetch_transcript_api(video_id: str) -> str:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
-            if exc.code != 429 and not 500 <= exc.code <= 599:
+            if exc.code == 429:
+                _API_RATE_LIMITED = True
+                raise RuntimeError(
+                    f"HTTP 429: public transcript API rate limit reached; "
+                    f"disabled for the rest of this run: {detail}"
+                ) from exc
+            if not 500 <= exc.code <= 599:
                 raise last_error
-            wait = API_RATE_LIMIT_WAIT_SECONDS if exc.code == 429 else API_RETRY_SECONDS
+            wait = API_RETRY_SECONDS
         except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             wait = API_RETRY_SECONDS
