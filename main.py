@@ -21,6 +21,8 @@ except ImportError:
     print("Missing dependency: run pip install -r requirements.txt", file=sys.stderr)
     raise SystemExit(2)
 
+_WHISPER_MODELS: dict[str, Any] = {}
+
 DEFAULT_PLAYLIST = (
     "https://youtube.com/playlist?"
     "list=PLsb6UHPckO4tUqnS53ef529-7neQ6btEz"
@@ -214,7 +216,10 @@ def transcribe_whisper(video_url: str, video_id: str, temp_dir: Path,
         audio_files = [p for p in audio_dir.glob(f"{safe_name(video_id)}*") if p.is_file()]
     if not audio_files:
         raise RuntimeError("Не удалось скачать/подготовить аудио. Проверь установку FFmpeg.")
-    model = WhisperModel(model_name, device="auto", compute_type="int8")
+    model = _WHISPER_MODELS.get(model_name)
+    if model is None:
+        model = WhisperModel(model_name, device="auto", compute_type="int8")
+        _WHISPER_MODELS[model_name] = model
     segments, info = model.transcribe(
         str(audio_files[0]),
         language=language or None,
