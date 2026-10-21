@@ -17,6 +17,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate-editor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate editor syntax and output integrity
+        run: |
+          python -m py_compile light_edit_transcripts.py
+          mkdir -p output/transcripts
+          printf 'Привет  ,мир !\n\n\nТест 123.\n' > output/transcripts/sample.txt
+          cp output/transcripts/sample.txt /tmp/sample-original.txt
+          python light_edit_transcripts.py
+          cmp output/transcripts/sample.txt /tmp/sample-original.txt
+          test -s output/edited_transcripts/sample.txt
+          test -s output/editorial_summary.csv
+          test -s output/editorial_changes.csv
+          python -c "import zipfile; z=zipfile.ZipFile('output/youtube-transcripts.zip'); names=set(z.namelist()); assert 'transcripts/sample.txt' in names; assert 'edited_transcripts/sample.txt' in names; assert 'editorial_changes.csv' in names; print('Editor validation passed')"
+
   extract:
     runs-on: ubuntu-latest
     timeout-minutes: 360
