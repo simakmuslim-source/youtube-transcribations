@@ -19,6 +19,9 @@ from pathlib import Path
 PLAYLIST_ID = "PLsb6UHPckO4tUqnS53ef529-7neQ6btEz"
 PLAYLIST_TITLE = "ТОВАРНЫЕ ЗНАКИ"
 PLAYLIST_URL = f"https://www.youtube.com/playlist?list={PLAYLIST_ID}"
+ADDITIONAL_PLAYLISTS = [
+    "https://www.youtube.com/playlist?list=PLKDgr33hAwrqJ72ch2oKaRaXVNyhjUpAt",
+]
 REQUEST_GAP_SECONDS = 185
 API_MAX_ATTEMPTS = 2
 API_RETRY_SECONDS = 60
@@ -395,13 +398,53 @@ def persist_reports(out: Path, rows: list[dict]) -> None:
     )
 
 
+def discover_additional_playlist(url: str) -> list[tuple[str, str]]:
+    """Read playlist entries without downloading video or audio files."""
+    command = [
+        sys.executable, "-m", "yt_dlp", "--flat-playlist",
+        "--dump-single-json", "--skip-download", url,
+    ]
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=300, check=False
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "yt-dlp failed")[-1200:]
+        raise RuntimeError(f"Could not read additional playlist {url}: {details}")
+    payload = json.loads(result.stdout)
+    videos = []
+    for entry in payload.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        video_id = entry.get("id")
+        title = entry.get("title") or video_id or "Untitled video"
+        if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", str(video_id)):
+            videos.append((str(video_id), str(title)))
+    return videos
+
+
 def main() -> int:
     out = Path("output")
     transcripts_dir = out / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
 
+    all_videos = list(VIDEOS)
+    seen_ids = {video_id for video_id, _ in all_videos}
+    for additional_url in ADDITIONAL_PLAYLISTS:
+        print(f"Reading additional playlist: {additional_url}", flush=True)
+        try:
+            additional_videos = discover_additional_playlist(additional_url)
+            added = 0
+            for video_id, title in additional_videos:
+                if video_id not in seen_ids:
+                    all_videos.append((video_id, title))
+                    seen_ids.add(video_id)
+                    added += 1
+            print(f"  Added {added} unique videos from additional playlist.", flush=True)
+        except Exception as exc:
+            print(f"  WARNING: additional playlist could not be listed: {exc}", flush=True)
+
     rows = []
-    for index, (video_id, title) in enumerate(VIDEOS, 1):
+    for index, (video_id, title) in enumerate(all_videos, 1):
         output_path = transcripts_dir / f"{index:04d}_{video_id}_{safe_name(title)}.txt"
         rows.append({
             "playlist_index": index,
