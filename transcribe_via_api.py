@@ -70,15 +70,37 @@ def text_from_payload(payload):
     return ""
 
 def fetch_transcript(video_id: str):
+    """Fetch a transcript, retrying transient failures without retrying permanent 4xx errors."""
     query = urllib.parse.urlencode({"video_url": video_id})
     url = "https://api.freetranscriptapi.com/v1/transcript?" + query
-    req = urllib.request.Request(url, headers={"User-Agent": "youtube-transcribations/1.0"})
-    with urllib.request.urlopen(req, timeout=45) as response:
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    text = text_from_payload(payload)
-    if not text:
-        raise RuntimeError("API вернул ответ без текста: " + json.dumps(payload, ensure_ascii=False)[:600])
-    return text
+    last_error = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": "youtube-transcribations/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            text = text_from_payload(payload)
+            if not text:
+                raise RuntimeError("API вернул ответ без текста: " + json.dumps(payload, ensure_ascii=False)[:600])
+            return text
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            last_error = RuntimeError(f"HTTP {e.code}: {detail}")
+            # Missing videos/transcripts and other client errors won't improve on retry.
+            if e.code != 429 and not 500 <= e.code <= 599:
+                raise last_error
+            if e.code == 429:
+                wait = 1800
+            else:
+                wait = 185
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as e:
+            last_error = e
+            wait = 185
+        if attempt < max_attempts:
+            print(f"  Temporary failure (attempt {attempt}/{max_attempts}): {last_error}; retrying in {wait}s", flush=True)
+            time.sleep(wait)
+    raise RuntimeError(f"Failed after {max_attempts} attempts: {type(last_error).__name__}: {last_error}")
 
 def main():
     out = Path("output")
@@ -98,13 +120,10 @@ def main():
             path.write_text(text.rstrip() + "\n", encoding="utf-8")
             row["status"] = "ok"
             print(f"  OK: {len(text)} chars", flush=True)
-        except urllib.error.HTTPError as e:
+        except Exception as e:
             row["status"] = "error"
-            row["error"] = f"HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:500]}"
+            row["error"] = f"{type(e).__name__}: {e}"[:1000]
             print("  ERROR: " + row["error"], flush=True)
-            if e.code == 429:
-                print("  Rate limited; waiting 30 minutes before continuing.", flush=True)
-                time.sleep(1800)
         except Exception as e:
             row["status"] = "error"
             row["error"] = f"{type(e).__name__}: {e}"[:1000]
