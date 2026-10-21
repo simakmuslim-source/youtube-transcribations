@@ -51,6 +51,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Configure YouTube cookies (optional)
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+        run: |
+          if [ -n "${YOUTUBE_COOKIES_B64:-}" ]; then
+            printf '%s' "$YOUTUBE_COOKIES_B64" | base64 --decode > "$RUNNER_TEMP/youtube-cookies.txt"
+            chmod 600 "$RUNNER_TEMP/youtube-cookies.txt"
+            echo "YOUTUBE_COOKIES_FILE=$RUNNER_TEMP/youtube-cookies.txt" >> "$GITHUB_ENV"
+            echo "Private YouTube cookies configured."
+          else
+            echo "No YOUTUBE_COOKIES_B64 secret configured; YouTube may block this runner."
+          fi
       - name: Run transcription
         env:
           VIDEO_LIMIT: ${{ github.event.inputs.limit || '500' }}
