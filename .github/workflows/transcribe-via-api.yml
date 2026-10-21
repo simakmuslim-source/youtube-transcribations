@@ -1,4 +1,4 @@
-name: Extract playlist transcripts via public transcript API
+name: Super-hybrid playlist transcription
 
 on:
   workflow_dispatch:
@@ -10,35 +10,55 @@ on:
 permissions:
   contents: read
 
+# A new version replaces an older run using the same rate-limited API.
 concurrency:
   group: playlist-transcription-api
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Install audio tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Whisper fallback dependencies
-        run: python -m pip install --upgrade pip && python -m pip install faster-whisper pytubefix
-      - name: Fetch transcripts (API first, Whisper fallback)
+          cache: pip
+
+      - name: Restore transcripts from prior runs
+        uses: actions/cache@v4
+        with:
+          path: output/transcripts
+          key: youtube-transcripts-${{ github.workflow }}-${{ github.run_id }}
+          restore-keys: |
+            youtube-transcripts-${{ github.workflow }}-
+
+      - name: Install hybrid providers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
+
+      - name: Fetch captions first, then fall back to audio and Whisper
         run: python transcribe_via_api.py
-      - name: Upload transcript ZIP and report
+
+      - name: Upload transcripts, summary, and failed-video report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-transcripts-api
+          name: youtube-transcripts-super-hybrid
           path: |
             output/youtube-transcripts.zip
             output/report.csv
+            output/failed_videos.csv
+            output/failed_videos.txt
+            output/summary.json
             output/metadata.json
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
