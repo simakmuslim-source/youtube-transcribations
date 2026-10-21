@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
-"""Fetch public YouTube captions through a public transcript endpoint.
-
-This is a fallback for GitHub runners that YouTube blocks directly. It does not
-use account cookies. The endpoint is third-party and may rate-limit requests.
-"""
+"""Super-hybrid YouTube playlist transcription: API captions, native captions, then Whisper."""
 from __future__ import annotations
-import csv, json, re, time, urllib.error, urllib.parse, urllib.request, zipfile
+
+import csv
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
+
+PLAYLIST_ID = "PLsb6UHPckO4tUqnS53ef529-7neQ6btEz"
+PLAYLIST_TITLE = "ТОВАРНЫЕ ЗНАКИ"
+PLAYLIST_URL = f"https://www.youtube.com/playlist?list={PLAYLIST_ID}"
+REQUEST_GAP_SECONDS = 185
+API_MAX_ATTEMPTS = 2
+API_RETRY_SECONDS = 60
+API_RATE_LIMIT_WAIT_SECONDS = 1900
 
 VIDEOS = [
     ("tNiUSSZj2n4", "Бесплатная бригада #бизнес #shorts #shortvideo"),
@@ -44,148 +60,460 @@ VIDEOS = [
     ("xbSuN3hDyjk", "Что такое фирменное наименование и каким оно должно быть?"),
 ]
 
-def safe_name(s: str) -> str:
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s)
-    return re.sub(r"\s+", " ", s).strip(" ._")[:100] or "video"
+FIELDS = [
+    "playlist_index", "video_id", "title", "url", "status", "source",
+    "transcript_file", "download_method", "attempted_at",
+    "api_error", "captions_error", "pytubefix_error", "yt_dlp_error",
+    "whisper_error", "error",
+]
+_WHISPER_MODEL = None
 
-def text_from_payload(payload):
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def safe_name(value: str) -> str:
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+    return re.sub(r"\s+", " ", value).strip(" ._")[:100] or "video"
+
+
+def video_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def text_from_payload(payload) -> str:
     if isinstance(payload, str):
         return payload.strip()
     if isinstance(payload, list):
         parts = []
         for item in payload:
             if isinstance(item, str):
-                parts.append(item)
+                if item.strip():
+                    parts.append(item.strip())
             elif isinstance(item, dict):
-                t = item.get("text") or item.get("content") or item.get("transcript")
-                if isinstance(t, str) and t.strip():
-                    parts.append(t.strip())
+                value = item.get("text") or item.get("content") or item.get("transcript")
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
         return "\n".join(parts).strip()
     if isinstance(payload, dict):
         for key in ("transcript", "text", "captions", "segments", "data"):
             if key in payload:
-                found = text_from_payload(payload[key])
-                if found:
-                    return found
+                result = text_from_payload(payload[key])
+                if result:
+                    return result
     return ""
 
-def fetch_transcript(video_id: str):
-    """Fetch a transcript, retrying transient failures without retrying permanent 4xx errors."""
+
+def fetch_transcript_api(video_id: str) -> str:
+    """Try the public transcript endpoint first; retry only transient errors."""
     query = urllib.parse.urlencode({"video_url": video_id})
     url = "https://api.freetranscriptapi.com/v1/transcript?" + query
     last_error = None
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        req = urllib.request.Request(url, headers={"User-Agent": "youtube-transcribations/1.0"})
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "youtube-transcribations/2.0"}
+        )
         try:
-            with urllib.request.urlopen(req, timeout=90) as response:
+            with urllib.request.urlopen(request, timeout=75) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            text = text_from_payload(payload)
-            if not text:
-                raise RuntimeError("API вернул ответ без текста: " + json.dumps(payload, ensure_ascii=False)[:600])
-            return text
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-            last_error = RuntimeError(f"HTTP {e.code}: {detail}")
-            # Missing videos/transcripts and other client errors won't improve on retry.
-            if e.code != 429 and not 500 <= e.code <= 599:
+            transcript = text_from_payload(payload)
+            if transcript:
+                return transcript
+            raise RuntimeError(
+                "API returned no transcript text: "
+                + json.dumps(payload, ensure_ascii=False)[:500]
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+            if exc.code != 429 and not 500 <= exc.code <= 599:
                 raise last_error
-            if e.code == 429:
-                wait = 1800
-            else:
-                wait = 185
-        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as e:
-            last_error = e
-            wait = 185
-        if attempt < max_attempts:
-            print(f"  Temporary failure (attempt {attempt}/{max_attempts}): {last_error}; retrying in {wait}s", flush=True)
+            wait = API_RATE_LIMIT_WAIT_SECONDS if exc.code == 429 else API_RETRY_SECONDS
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, RuntimeError) as exc:
+            last_error = exc
+            wait = API_RETRY_SECONDS
+        if attempt < API_MAX_ATTEMPTS:
+            print(
+                f"  API temporary error ({attempt}/{API_MAX_ATTEMPTS}): {last_error}; "
+                f"retry in {wait}s",
+                flush=True,
+            )
             time.sleep(wait)
-    raise RuntimeError(f"Failed after {max_attempts} attempts: {type(last_error).__name__}: {last_error}")
+    raise RuntimeError(
+        f"API failed after {API_MAX_ATTEMPTS} attempts: "
+        f"{type(last_error).__name__}: {last_error}"
+    )
 
-def fetch_with_whisper(video_id: str) -> str:
-    """Fallback: download audio and transcribe it locally with faster-whisper."""
-    import tempfile
+
+def caption_items_to_text(items) -> str:
+    parts = []
+    for item in items:
+        if isinstance(item, dict):
+            part = item.get("text", "")
+        else:
+            part = getattr(item, "text", "")
+        if part and str(part).strip():
+            parts.append(str(part).strip())
+    # No editorial corrections are applied; the text is taken from the source captions.
+    return " ".join(parts).strip()
+
+
+def fetch_youtube_captions(video_id: str) -> str:
+    """Second source: YouTube's own captions, preferring Russian and then English."""
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    api = YouTubeTranscriptApi()
+    try:
+        fetched = api.fetch(video_id, languages=["ru", "en"])
+        text = caption_items_to_text(fetched)
+        if text:
+            return text
+    except Exception as preferred_error:
+        print(f"  Preferred caption language lookup failed: {preferred_error}", flush=True)
+
+    # If Russian/English captions were not found, try another available caption track.
+    transcript_list = api.list(video_id)
+    tracks = list(transcript_list)
+    if not tracks:
+        raise RuntimeError("YouTube returned no caption tracks")
+    preferred = None
+    for track in tracks:
+        language_code = getattr(track, "language_code", "")
+        if language_code in ("ru", "ru-RU", "en", "en-US"):
+            preferred = track
+            if language_code in ("ru", "ru-RU"):
+                break
+    selected = preferred or tracks[0]
+    fetched = selected.fetch()
+    text = caption_items_to_text(fetched)
+    if not text:
+        raise RuntimeError("YouTube caption track contained no text")
+    return text
+
+
+def download_audio_pytubefix(video_id: str, directory: Path) -> Path:
     from pytubefix import YouTube
-    from faster_whisper import WhisperModel
 
-    print("  Trying Whisper fallback: downloading audio...", flush=True)
-    with tempfile.TemporaryDirectory() as temp_dir:
-        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
-        stream = yt.streams.filter(only_audio=True).first()
-        if stream is None:
-            raise RuntimeError("YouTube не предоставил аудиопоток")
-        audio_path = stream.download(output_path=temp_dir, filename="audio")
-        print("  Audio downloaded; loading Whisper small model on CPU...", flush=True)
-        model = WhisperModel("small", device="cpu", compute_type="int8")
-        segments, info = model.transcribe(audio_path, beam_size=5, vad_filter=True)
+    yt = YouTube(video_url(video_id))
+    stream = yt.streams.filter(only_audio=True).first()
+    if stream is None:
+        raise RuntimeError("pytubefix: YouTube returned no audio-only stream")
+    path = Path(stream.download(output_path=str(directory), filename="audio"))
+    if not path.exists() or path.stat().st_size == 0:
+        raise RuntimeError("pytubefix returned a missing or empty audio file")
+    return path
+
+
+def download_audio_ytdlp(video_id: str, directory: Path) -> Path:
+    output_template = str(directory / "audio.%(ext)s")
+    command = [
+        sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+        "--retries", "2", "--fragment-retries", "2",
+        "-f", "bestaudio/best", "-o", output_template, video_url(video_id),
+    ]
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=1200, check=False
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "yt-dlp exited unsuccessfully")[-1200:]
+        raise RuntimeError(f"yt-dlp exited {result.returncode}: {details}")
+    candidates = sorted(
+        p for p in directory.glob("audio.*")
+        if p.is_file() and not p.name.endswith((".part", ".ytdl"))
+    )
+    if not candidates or candidates[0].stat().st_size == 0:
+        raise RuntimeError("yt-dlp did not produce a non-empty audio file")
+    return candidates[0]
+
+
+def get_whisper_model():
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+        print("  Loading faster-whisper small model (CPU/int8)...", flush=True)
+        _WHISPER_MODEL = WhisperModel("small", device="cpu", compute_type="int8")
+    return _WHISPER_MODEL
+
+
+def fetch_with_whisper(video_id: str) -> tuple[str, str, str, str]:
+    """Third source: download audio, using two downloaders, then local Whisper."""
+    import_errors = []
+    with tempfile.TemporaryDirectory(prefix="youtube-transcribations-") as tmp:
+        directory = Path(tmp)
+        audio_path = None
+        method = ""
+        pytubefix_error = ""
+        yt_dlp_error = ""
+        try:
+            print("  Whisper fallback: trying pytubefix audio download...", flush=True)
+            audio_path = download_audio_pytubefix(video_id, directory)
+            method = "pytubefix"
+        except Exception as exc:
+            pytubefix_error = f"{type(exc).__name__}: {exc}"[:1200]
+            print(f"  pytubefix download failed: {pytubefix_error}", flush=True)
+            try:
+                print("  Trying yt-dlp audio download...", flush=True)
+                audio_path = download_audio_ytdlp(video_id, directory)
+                method = "yt-dlp"
+            except Exception as ytdlp_exc:
+                yt_dlp_error = f"{type(ytdlp_exc).__name__}: {ytdlp_exc}"[:1200]
+                raise RuntimeError(
+                    "Audio download failed; pytubefix: "
+                    + (pytubefix_error or "unknown error")
+                    + "; yt-dlp: "
+                    + (yt_dlp_error or "unknown error")
+                ) from ytdlp_exc
+
+        model = get_whisper_model()
+        segments, info = model.transcribe(
+            str(audio_path), beam_size=5, vad_filter=True
+        )
         parts = [segment.text.strip() for segment in segments if segment.text.strip()]
         text = " ".join(parts).strip()
         if not text:
-            raise RuntimeError("Whisper не распознал речь")
-        print(f"  Whisper fallback OK: {len(text)} chars; language={info.language}", flush=True)
-        return text
+            raise RuntimeError("Whisper finished but returned no speech text")
+        print(
+            f"  Whisper succeeded: {len(text)} chars; language={info.language}; "
+            f"downloader={method}",
+            flush=True,
+        )
+        return text, method, pytubefix_error, yt_dlp_error
 
-def main():
+
+def resolve_title_from_oembed(video_id: str, fallback_title: str) -> str:
+    """Best-effort title lookup for the failure report; retain playlist title if blocked."""
+    url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
+        {"url": video_url(video_id), "format": "json"}
+    )
+    try:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "youtube-transcribations/2.0"}
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        title = payload.get("title")
+        return title.strip() if isinstance(title, str) and title.strip() else fallback_title
+    except Exception:
+        return fallback_title
+
+
+def write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def persist_reports(out: Path, rows: list[dict]) -> None:
+    """Persist an all-videos report and a title-rich list of incomplete videos."""
+    write_csv(out / "report.csv", rows, FIELDS)
+    incomplete = [row for row in rows if row.get("status") != "ok"]
+    write_csv(out / "failed_videos.csv", incomplete, FIELDS)
+
+    lines = [
+        f"Плейлист: {PLAYLIST_TITLE}",
+        f"URL: {PLAYLIST_URL}",
+        f"Всего видео: {len(rows)}",
+        f"Успешно обработано: {sum(row.get('status') == 'ok' for row in rows)}",
+        f"Не завершено: {len(incomplete)}",
+        "",
+    ]
+    if not incomplete:
+        lines.append("Все видео обработаны успешно.")
+    else:
+        lines.append("Список видео, которые не удалось завершить на момент формирования отчёта:")
+        lines.append("")
+        for row in incomplete:
+            index = row.get("playlist_index", "?")
+            title = row.get("title") or "(название не определено)"
+            status = row.get("status", "unknown")
+            reason = row.get("error") or (
+                "Видео ещё не было обработано (запуск остановлен или не дошёл до него)."
+                if status in ("pending", "processing")
+                else "Причина не записана."
+            )
+            lines.extend([
+                f"{index}. {title}",
+                f"   Статус: {status}",
+                f"   ID: {row.get('video_id', '')}",
+                f"   URL: {row.get('url', '')}",
+                f"   Причина: {reason}",
+                "",
+            ])
+    (out / "failed_videos.txt").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+    counts = {}
+    for row in rows:
+        status = row.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    summary = {
+        "playlist_title": PLAYLIST_TITLE,
+        "playlist_id": PLAYLIST_ID,
+        "playlist_url": PLAYLIST_URL,
+        "updated_at_utc": now_utc(),
+        "total_videos": len(rows),
+        "status_counts": counts,
+        "successful": counts.get("ok", 0),
+        "incomplete": len(incomplete),
+        "incomplete_videos": [
+            {
+                "playlist_index": row.get("playlist_index"),
+                "title": row.get("title"),
+                "video_id": row.get("video_id"),
+                "url": row.get("url"),
+                "status": row.get("status"),
+                "error": row.get("error", ""),
+            }
+            for row in incomplete
+        ],
+    }
+    (out / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    metadata = {
+        "playlist": {
+            "title": PLAYLIST_TITLE,
+            "id": PLAYLIST_ID,
+            "webpage_url": PLAYLIST_URL,
+            "video_count_found": len(VIDEOS),
+        },
+        "videos": rows,
+    }
+    (out / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def main() -> int:
     out = Path("output")
-    transcripts = out / "transcripts"
-    transcripts.mkdir(parents=True, exist_ok=True)
+    transcripts_dir = out / "transcripts"
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+
     rows = []
-    total = len(VIDEOS)
-    for i, (video_id, title) in enumerate(VIDEOS, 1):
-        path = transcripts / f"{i:04d}_{video_id}_{safe_name(title)}.txt"
-        row = {"playlist_index": i, "video_id": video_id, "title": title,
-               "url": f"https://www.youtube.com/watch?v={video_id}",
-               "status": "", "source": "freetranscriptapi", "transcript_file": str(path),
-               "error": ""}
-        print(f"[{i}/{total}] {title}", flush=True)
+    for index, (video_id, title) in enumerate(VIDEOS, 1):
+        output_path = transcripts_dir / f"{index:04d}_{video_id}_{safe_name(title)}.txt"
+        rows.append({
+            "playlist_index": index,
+            "video_id": video_id,
+            "title": title,
+            "url": video_url(video_id),
+            "status": "pending",
+            "source": "",
+            "transcript_file": str(output_path),
+            "download_method": "",
+            "attempted_at": "",
+            "api_error": "",
+            "captions_error": "",
+            "pytubefix_error": "",
+            "yt_dlp_error": "",
+            "whisper_error": "",
+            "error": "",
+        })
+    persist_reports(out, rows)
+
+    total = len(rows)
+    for index, row in enumerate(rows):
+        video_id = row["video_id"]
+        title = row["title"]
+        output_path = Path(row["transcript_file"])
+        print(f"[{index + 1}/{total}] {title}", flush=True)
+        row["status"] = "processing"
+        row["attempted_at"] = now_utc()
+        persist_reports(out, rows)
+
         try:
-            text = fetch_transcript(video_id)
-            path.write_text(text.rstrip() + "\n", encoding="utf-8")
-            row["status"] = "ok"
-            print(f"  OK via public transcript API: {len(text)} chars", flush=True)
-        except Exception as api_error:
-            print(f"  Public transcript API failed: {type(api_error).__name__}: {api_error}", flush=True)
-            try:
-                text = fetch_with_whisper(video_id)
-                path.write_text(text.rstrip() + "\n", encoding="utf-8")
+            # Reuse a transcript restored by GitHub Actions cache on reruns.
+            if output_path.exists() and output_path.stat().st_size > 0:
                 row["status"] = "ok"
-                row["source"] = "faster-whisper-small"
-                row["error"] = f"Primary API failed; recovered with Whisper: {type(api_error).__name__}: {api_error}"[:1000]
-            except Exception as whisper_error:
-                row["status"] = "error"
-                row["error"] = (
-                    f"API: {type(api_error).__name__}: {api_error}; "
-                    f"Whisper: {type(whisper_error).__name__}: {whisper_error}"
-                )[:1500]
-                print("  ERROR: " + row["error"], flush=True)
-        except Exception as e:
+                row["source"] = "cached-transcript"
+                print("  SKIP: reusing transcript from cache", flush=True)
+            else:
+                try:
+                    text = fetch_transcript_api(video_id)
+                    row["source"] = "freetranscriptapi"
+                except Exception as api_error:
+                    row["api_error"] = f"{type(api_error).__name__}: {api_error}"[:1500]
+                    print(f"  Primary transcript API failed: {row['api_error']}", flush=True)
+                    try:
+                        text = fetch_youtube_captions(video_id)
+                        row["source"] = "youtube-transcript-api"
+                    except Exception as captions_error:
+                        row["captions_error"] = (
+                            f"{type(captions_error).__name__}: {captions_error}"
+                        )[:1500]
+                        print(f"  YouTube captions failed: {row['captions_error']}", flush=True)
+                        try:
+                            text, method, pytubefix_error, yt_dlp_error = fetch_with_whisper(video_id)
+                            row["source"] = "faster-whisper-small"
+                            row["download_method"] = method
+                            row["pytubefix_error"] = pytubefix_error
+                            row["yt_dlp_error"] = yt_dlp_error
+                        except Exception as whisper_error:
+                            row["whisper_error"] = (
+                                f"{type(whisper_error).__name__}: {whisper_error}"
+                            )[:1800]
+                            if "pytubefix:" in str(whisper_error):
+                                details = str(whisper_error)
+                                match = re.search(r"pytubefix: (.*?); yt-dlp: (.*)", details, re.S)
+                                if match:
+                                    row["pytubefix_error"] = match.group(1)[:1200]
+                                    row["yt_dlp_error"] = match.group(2)[:1200]
+                            raise RuntimeError("All transcription methods failed")
+                if not isinstance(text, str) or not text.strip():
+                    raise RuntimeError("Selected provider returned an empty transcript")
+                output_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+                row["status"] = "ok"
+                print(
+                    f"  OK via {row['source']}: {len(text)} characters",
+                    flush=True,
+                )
+        except Exception as error:
             row["status"] = "error"
-            row["error"] = f"{type(e).__name__}: {e}"[:1000]
-            print("  ERROR: " + row["error"], flush=True)
-        rows.append(row)
-        with (out / "report.csv").open("w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=list(row.keys()))
-            w.writeheader()
-            w.writerows(rows)
-        if i < total:
-            # Public endpoint documents a limit of 20 requests/hour per IP.
-            time.sleep(185)
-    metadata = {"playlist": {"title": "ТОВАРНЫЕ ЗНАКИ",
-        "id": "PLsb6UHPckO4tUqnS53ef529-7neQ6btEz",
-        "webpage_url": "https://www.youtube.com/playlist?list=PLsb6UHPckO4tUqnS53ef529-7neQ6btEz",
-        "video_count_found": total},
-        "videos": [{"id": vid, "title": title, "url": f"https://www.youtube.com/watch?v={vid}",
-                    "playlist_index": i} for i, (vid, title) in enumerate(VIDEOS, 1)]}
-    (out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    with zipfile.ZipFile(out / "youtube-transcripts.zip", "w", zipfile.ZIP_DEFLATED) as z:
-        for p in sorted(transcripts.glob("*.txt")):
-            z.write(p, f"transcripts/{p.name}")
-        for p in (out / "report.csv", out / "metadata.json"):
-            if p.exists(): z.write(p, p.name)
-    ok = sum(r["status"] == "ok" for r in rows)
-    print(f"Finished: {ok}/{total} transcripts. ZIP: output/youtube-transcripts.zip", flush=True)
-    # Return success so the artifact is uploaded even if some videos have no captions.
+            row["title"] = resolve_title_from_oembed(video_id, row["title"])
+            diagnostics = [
+                f"API: {row['api_error']}" if row["api_error"] else "",
+                f"YouTube captions: {row['captions_error']}" if row["captions_error"] else "",
+                f"Audio: pytubefix: {row['pytubefix_error']}" if row["pytubefix_error"] else "",
+                f"Audio: yt-dlp: {row['yt_dlp_error']}" if row["yt_dlp_error"] else "",
+                f"Whisper: {row['whisper_error']}" if row["whisper_error"] else "",
+                f"Final error: {type(error).__name__}: {error}",
+            ]
+            row["error"] = " | ".join(part for part in diagnostics if part)[:5000]
+            print(f"  FAILED: {row['title']} ({video_id})", flush=True)
+            print(f"  Reason: {row['error']}", flush=True)
+        finally:
+            persist_reports(out, rows)
+
+        if index < total - 1:
+            # The public transcript endpoint documents a 20-requests/hour limit.
+            time.sleep(REQUEST_GAP_SECONDS)
+
+    # Build one ZIP containing successful transcripts and the all-failures report.
+    persist_reports(out, rows)
+    archive_path = out / "youtube-transcripts.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(transcripts_dir.glob("*.txt")):
+            archive.write(path, f"transcripts/{path.name}")
+        for name in (
+            "report.csv", "failed_videos.csv", "failed_videos.txt",
+            "summary.json", "metadata.json",
+        ):
+            path = out / name
+            if path.exists():
+                archive.write(path, name)
+
+    successful = sum(row["status"] == "ok" for row in rows)
+    failed = [row for row in rows if row["status"] != "ok"]
+    print(
+        f"Finished: {successful}/{total} successful; {len(failed)} incomplete. "
+        "The ZIP contains failed_videos.txt with titles, links, IDs, and reasons.",
+        flush=True,
+    )
+    # Return zero so GitHub uploads transcripts and the failure report even if some videos fail.
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
