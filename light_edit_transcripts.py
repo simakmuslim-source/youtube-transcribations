@@ -84,7 +84,7 @@ def build_combined_playlist() -> None:
             rows = []
 
     def playlist_order(path: Path) -> tuple[int, str]:
-        match = re.match(r"^(\\d+)_", path.name)
+        match = re.match(r"^(\d+)_", path.name)
         return (int(match.group(1)) if match else 10**9, path.name.casefold())
 
     by_name = {path.name: path for path in ORIGINALS.glob("*.txt")}
@@ -109,12 +109,12 @@ def build_combined_playlist() -> None:
         if url:
             header.append(f"ССЫЛКА: {url}")
         header.append("=" * 72)
-        transcript = source.read_text(encoding="utf-8", errors="replace").strip("\\ufeff\\r\\n")
-        chunks.append("\\n".join(header) + "\\n\\n" + transcript)
+        transcript = source.read_text(encoding="utf-8", errors="replace").strip("\ufeff\r\n")
+        chunks.append("\n".join(header) + "\n\n" + transcript)
     combined = OUT / "playlist_transcripts.txt"
     combined.write_text(
-        ("\\n\\n\\n".join(chunks) + "\\n") if chunks else
-        "Транскрипции пока не созданы.\\n",
+        ("\n\n\n".join(chunks) + "\n") if chunks else
+        "Транскрипции пока не созданы.\n",
         encoding="utf-8",
     )
     print(f"Combined playlist TXT: {len(ordered)} transcript(s) in playlist order.")
