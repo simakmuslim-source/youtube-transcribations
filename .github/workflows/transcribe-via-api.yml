@@ -11,10 +11,10 @@ on:
 permissions:
   contents: read
 
-# A new version replaces an older run using the same rate-limited API.
+# Keep the active transcription running; newer commits must not kill hours of work.
 concurrency:
-  group: playlist-transcription-super-hybrid-v2
-  cancel-in-progress: true
+  group: playlist-transcription-super-hybrid-v3
+  cancel-in-progress: false
 
 jobs:
   validate-editor:
