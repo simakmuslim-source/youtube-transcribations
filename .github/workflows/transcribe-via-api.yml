@@ -10,10 +10,10 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
-# Keep the active transcription running; newer commits must not kill hours of work.
 concurrency:
-  group: playlist-transcription-super-hybrid-v3
+  group: playlist-transcription-resumable-v4
   cancel-in-progress: false
 
 jobs:
@@ -41,47 +41,171 @@ jobs:
           grep -q 'Привет' output/playlist_transcripts.txt
           python -c "import zipfile; z=zipfile.ZipFile('output/youtube-transcripts.zip'); names=set(z.namelist()); assert 'transcripts/sample.txt' in names; assert 'edited_transcripts/sample.txt' in names; assert 'editorial_changes.csv' in names; assert 'playlist_transcripts.txt' in names; print('Editor validation passed')"
 
-  extract:
+  batch-1:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    steps:
+    steps: &transcription_steps
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Install audio tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-
-      - name: Restore transcripts from prior runs
+      - name: Restore transcripts from this run or prior cache
         uses: actions/cache@v4
         with:
           path: output/transcripts
-          key: youtube-transcripts-${{ github.workflow }}-${{ github.run_id }}
+          key: youtube-transcripts-${{ github.run_id }}-batch-1
           restore-keys: |
-            youtube-transcripts-${{ github.workflow }}-
-
+            youtube-transcripts-${{ github.run_id }}-batch-
+            youtube-transcripts-
+      - name: Recover transcripts from the last interrupted run
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: youtube-transcripts-super-hybrid
+          repository: simakmuslim-source/youtube-transcribations
+          run-id: 39712648984
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: recovery
+      - name: Merge recovered originals without overwriting any existing file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          archive = next(Path("recovery").rglob("youtube-transcripts.zip"), None) if Path("recovery").exists() else None
+          target = Path("output/transcripts")
+          target.mkdir(parents=True, exist_ok=True)
+          if archive:
+              with zipfile.ZipFile(archive) as z:
+                  recovered = 0
+                  for item in z.infolist():
+                      if not item.filename.startswith("transcripts/") or not item.filename.endswith(".txt"):
+                          continue
+                      dest = target / Path(item.filename).name
+                      if not dest.exists():
+                          dest.write_bytes(z.read(item))
+                          recovered += 1
+              print(f"Recovered {recovered} original transcript files from the interrupted run.")
+          else:
+              print("Previous run artifact unavailable; continuing with restored cache.")
+          PY
       - name: Install hybrid providers
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
-
-      - name: Fetch captions first, then fall back to audio and Whisper
+      - name: Transcribe this playlist segment
+        env:
+          BATCH_START: "1"
+          BATCH_SIZE: "43"
         run: python transcribe_via_api.py
 
+  batch-2:
+    needs: batch-1
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install audio tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Restore transcripts from previous batch
+        uses: actions/cache@v4
+        with:
+          path: output/transcripts
+          key: youtube-transcripts-${{ github.run_id }}-batch-2
+          restore-keys: |
+            youtube-transcripts-${{ github.run_id }}-batch-
+            youtube-transcripts-
+      - name: Install hybrid providers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
+      - name: Transcribe this playlist segment
+        env:
+          BATCH_START: "44"
+          BATCH_SIZE: "43"
+        run: python transcribe_via_api.py
+
+  batch-3:
+    needs: batch-2
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install audio tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Restore transcripts from previous batch
+        uses: actions/cache@v4
+        with:
+          path: output/transcripts
+          key: youtube-transcripts-${{ github.run_id }}-batch-3
+          restore-keys: |
+            youtube-transcripts-${{ github.run_id }}-batch-
+            youtube-transcripts-
+      - name: Install hybrid providers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
+      - name: Transcribe this playlist segment
+        env:
+          BATCH_START: "87"
+          BATCH_SIZE: "43"
+        run: python transcribe_via_api.py
+
+  batch-4:
+    needs: batch-3
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install audio tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Restore transcripts from previous batch
+        uses: actions/cache@v4
+        with:
+          path: output/transcripts
+          key: youtube-transcripts-${{ github.run_id }}-batch-4
+          restore-keys: |
+            youtube-transcripts-${{ github.run_id }}-batch-
+            youtube-transcripts-
+      - name: Install hybrid providers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
+      - name: Transcribe this playlist segment
+        env:
+          BATCH_START: "130"
+          BATCH_SIZE: "43"
+        run: python transcribe_via_api.py
       - name: Apply conservative light editing and rebuild ZIP
         if: always()
         run: python light_edit_transcripts.py
-
       - name: Upload originals, edited transcripts, and reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-transcripts-super-hybrid
+          name: youtube-transcripts-resumable
           path: |
             output/youtube-transcripts.zip
             output/report.csv

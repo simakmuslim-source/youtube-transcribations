@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -463,14 +464,38 @@ def main() -> int:
             "whisper_error": "",
             "error": "",
         })
+    # Mark recovered transcripts before writing reports, including files outside this batch.
+    for row in rows:
+        existing = Path(row["transcript_file"])
+        if existing.exists() and existing.stat().st_size > 0:
+            row["status"] = "ok"
+            row["source"] = "cached-transcript"
+
     persist_reports(out, rows)
 
     total = len(rows)
+    batch_start = max(1, int(os.environ.get("BATCH_START", "1")))
+    batch_size = max(1, int(os.environ.get("BATCH_SIZE", str(total))))
+    batch_start_index = batch_start - 1
+    batch_end_index = min(total, batch_start_index + batch_size)
+    print(
+        f"Processing playlist indexes {batch_start_index + 1}-{batch_end_index} "
+        f"of {total}; existing transcripts will be preserved.",
+        flush=True,
+    )
     for index, row in enumerate(rows):
+        if not (batch_start_index <= index < batch_end_index):
+            continue
         video_id = row["video_id"]
         title = row["title"]
         output_path = Path(row["transcript_file"])
         print(f"[{index + 1}/{total}] {title}", flush=True)
+        if output_path.exists() and output_path.stat().st_size > 0:
+            row["status"] = "ok"
+            row["source"] = "cached-transcript"
+            print("  SKIP: preserving an existing transcript", flush=True)
+            persist_reports(out, rows)
+            continue
         row["status"] = "processing"
         row["attempted_at"] = now_utc()
         persist_reports(out, rows)
@@ -538,7 +563,7 @@ def main() -> int:
         finally:
             persist_reports(out, rows)
 
-        if index < total - 1:
+        if index < batch_end_index - 1:
             # The public transcript endpoint documents a 20-requests/hour limit.
             time.sleep(REQUEST_GAP_SECONDS)
 
