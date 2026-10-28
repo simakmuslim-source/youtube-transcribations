@@ -22,6 +22,7 @@ PLAYLIST_TITLE = "ТОВАРНЫЕ ЗНАКИ"
 PLAYLIST_URL = f"https://www.youtube.com/playlist?list={PLAYLIST_ID}"
 ADDITIONAL_PLAYLISTS = [
     "https://www.youtube.com/playlist?list=PLKDgr33hAwrqJ72ch2oKaRaXVNyhjUpAt",
+    "https://www.youtube.com/playlist?list=PLmyeVC0yzg1UCGKhRxAIvzwyiauZjXT-A",
 ]
 REQUEST_GAP_SECONDS = 185
 API_MAX_ATTEMPTS = 2
