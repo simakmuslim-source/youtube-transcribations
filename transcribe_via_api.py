@@ -23,7 +23,7 @@ PLAYLIST_URL = f"https://www.youtube.com/playlist?list={PLAYLIST_ID}"
 ADDITIONAL_PLAYLISTS = [
     "https://www.youtube.com/playlist?list=PLKDgr33hAwrqJ72ch2oKaRaXVNyhjUpAt",
     "https://www.youtube.com/playlist?list=PLmyeVC0yzg1UCGKhRxAIvzwyiauZjXT-A",
-    "https://www.youtube.com/playlist?list=PLHpFjahfyry8",
+    "https://www.youtube.com/playlist?list=PLHpFjahfyry8",  # fourth requested playlist
 ]
 REQUEST_GAP_SECONDS = 185
 API_MAX_ATTEMPTS = 2
