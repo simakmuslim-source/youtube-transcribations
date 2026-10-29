@@ -230,6 +230,39 @@ jobs:
           BATCH_START: "173"
           BATCH_SIZE: "43"
         run: python transcribe_via_api.py
+
+  batch-6:
+    needs: batch-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install audio tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Restore transcripts from previous batch
+        uses: actions/cache@v4
+        with:
+          path: output/transcripts
+          key: youtube-transcripts-${{ github.run_id }}-batch-6
+          restore-keys: |
+            youtube-transcripts-${{ github.run_id }}-batch-
+            youtube-transcripts-
+      - name: Install hybrid providers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade faster-whisper pytubefix yt-dlp youtube-transcript-api
+      - name: Transcribe this playlist segment
+        env:
+          BATCH_START: "180"
+          BATCH_SIZE: "43"
+        run: python transcribe_via_api.py
+
       - name: Apply conservative light editing and rebuild ZIP
         if: always()
         run: python light_edit_transcripts.py
